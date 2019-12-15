@@ -1,0 +1,429 @@
+#!/usr/bin/env ruby
+
+DESCRIPTIONS = [
+  {
+    name: 'increment',
+    symbols: [ :BLANK, 0, 1 ],
+    blank_symbol: :BLANK,
+    init_state: :s0,
+    states: {
+      # Skip initial blanks
+      s0: {
+        0      => [      0, :s1, :RIGHT ],
+        1      => [      1, :s1, :RIGHT ],
+        :BLANK => [ :BLANK, :s0, :RIGHT ],
+      },
+      # Find end of number
+      s1: {
+        0      => [      0, :s1, :RIGHT ],
+        1      => [      1, :s1, :RIGHT ],
+        :BLANK => [ :BLANK, :s2, :LEFT  ],
+      },
+      # Increment
+      s2: {
+        0      => [      1, :s3, :HALT  ],
+        1      => [      0, :s2, :LEFT  ],
+        :BLANK => [      1, :s3, :HALT  ],
+      },
+    },
+    inputs: {
+      "increment-0":     [ 0 ],
+      "increment-1":     [ :BLANK, 1 ],
+      "increment-11":    [ :BLANK, 1, 1 ],
+      "increment-10011": [ 1, 0, 0, 1, 1 ],
+    }
+  },
+
+  # Taken from https://de.wikipedia.org/wiki/Turingmaschine#Beispiel
+  {
+    name: 'copy',
+    symbols: [ 0, 1 ],
+    blank_symbol: 0,
+    init_state: :s1,
+    states: {
+      s1: {
+        0 => [ 0, :s6, :HALT  ],
+        1 => [ 0, :s2, :RIGHT ],
+      },
+      s2: {
+        0 => [ 0, :s3, :RIGHT ],
+        1 => [ 1, :s2, :RIGHT ],
+      },
+      s3: {
+        0 => [ 1, :s4, :LEFT  ],
+        1 => [ 1, :s3, :RIGHT ],
+      },
+      s4: {
+        0 => [ 0, :s5, :LEFT  ],
+        1 => [ 1, :s4, :LEFT  ],
+      },
+      s5: {
+        0 => [ 1, :s1, :RIGHT ],
+        1 => [ 1, :s5, :LEFT  ],
+      },
+    },
+    inputs: {
+      example1: [ 1, 1 ],
+      example2: [ 1, 1, 1, 1, 1 ],
+    }
+  },
+]
+
+require 'erb'
+require "fileutils"
+
+def write_workflow(file_name, content)
+  file = File.join(__dir__, "assets", "opencast", "workflows", file_name)
+  puts "  * #{file}"
+  File.open(file, "w") { |f| f.write content }
+end
+
+def write_bin(file_name, content, script=false)
+  file = File.join(__dir__, "bin", file_name)
+  puts "  * #{file}"
+  File.open(file, "w") { |f| f.write content }
+  if script
+    FileUtils.chmod("+x", file)
+  end
+end
+
+def main
+  DESCRIPTIONS.each do |desc|
+    puts "#{desc[:name]}:"
+
+    write_workflow("#{desc[:name]}.xml", TPL_WORKFLOW_MAIN.result_with_hash(desc))
+    write_workflow("#{desc[:name]}-state-switch.xml", TPL_WORKFLOW_STATE_SWITCH.result_with_hash(desc))
+    write_workflow("#{desc[:name]}-head-load.xml", TPL_WORKFLOW_HEAD_LOAD.result_with_hash(desc))
+    write_workflow("#{desc[:name]}-head-move.xml", TPL_WORKFLOW_HEAD_MOVE.result_with_hash(desc))
+    write_workflow("#{desc[:name]}-halt.xml", TPL_WORKFLOW_HALT.result_with_hash(desc))
+
+    desc[:states].each do |state_name, state_rules|
+      h = desc.clone
+      h[:state_name] = state_name
+      h[:state_rules] = state_rules
+
+      write_workflow("#{desc[:name]}-#{state_name}.xml", TPL_WORKFLOW_STATE_MAIN.result_with_hash(h))
+      write_workflow("#{desc[:name]}-#{state_name}-head-set.xml", TPL_WORKFLOW_STATE_HEAD_SET.result_with_hash(h))
+      write_workflow("#{desc[:name]}-#{state_name}-state-set.xml", TPL_WORKFLOW_STATE_STATE_SET.result_with_hash(h))
+    end
+
+    write_bin("dublincore-#{desc[:name]}-turing-constants.xml", TPL_CATALOG_TURING_CONSTANTS.result_with_hash(desc))
+
+    desc[:inputs].each do |input_name, input|
+      h = desc.clone
+      h[:input_name] = input_name
+      h[:input] = input
+
+      write_bin("dublincore-#{desc[:name]}-#{input_name}-episode.xml", TPL_CATALOG_EPISODE_INPUT.result_with_hash(h))
+      write_bin("dublincore-#{desc[:name]}-#{input_name}-turing.xml", TPL_CATALOG_TURING_INPUT.result_with_hash(h))
+      write_bin("#{desc[:name]}-#{input_name}.sh", TPL_SCRIPT_INGEST_INPUT.result_with_hash(h), true)
+    end
+  end
+end
+
+# ----------------------------------------------------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------------------------------------------------
+
+TPL_WORKFLOW_MAIN = ERB.new <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<definition xmlns="http://workflow.opencastproject.org">
+  <id><%= name %></id>
+  <tags>
+    <tag>schedule</tag>
+    <tag>upload</tag>
+  </tags>
+
+  <operations>
+
+    <operation id="configure-by-dcterm" description="INIT: SET VARIABLES">
+      <configurations>
+        <configuration key="dccatalog">turing-constants</configuration>
+        <configuration key="dcterm"><%= symbols[0] %></configuration>
+        <configuration key="match-value"><%= symbols[0] %></configuration>
+        <configuration key="head_index">0</configuration>
+        <configuration key="state"><%= init_state %></configuration>
+      </configurations>
+    </operation>
+
+    <operation id="include" description="STATE: SWITCH">
+      <configurations>
+        <configuration key="workflow-id"><%= name %>-state-switch</configuration>
+      </configurations>
+    </operation>
+
+  </operations>
+</definition>
+EOF
+
+# ----------------------------------------------------------------------------------------------------------------------
+
+TPL_WORKFLOW_STATE_SWITCH = ERB.new <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<definition xmlns="http://workflow.opencastproject.org">
+  <id><%= name %>-state-switch</id>
+  <operations>
+
+    <operation
+      id="include"
+      if="${head_move} == 'HALT'"
+      description="└─ Check for HALT">
+      <configurations>
+        <configuration key="workflow-id"><%= name %>-halt</configuration>
+      </configurations>
+    </operation>
+
+    <operation id="log" if="${null}" description="------------------------------"></operation>
+
+    <operation
+      id="include"
+      if="${head_move} != 'HALT'"
+      description="STATE: ${state}">
+      <configurations>
+        <configuration key="workflow-id"><%= name %>-${state}</configuration>
+      </configurations>
+    </operation>
+
+  </operations>
+</definition>
+EOF
+
+# ----------------------------------------------------------------------------------------------------------------------
+
+TPL_WORKFLOW_HEAD_LOAD = ERB.new <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<definition xmlns="http://workflow.opencastproject.org">
+  <id><%= name %>-head-load</id>
+  <operations>
+  <% symbols.each do |s| %>
+    <operation id="configure-by-dcterm" description="└─ Load value if <%= s %>">
+      <configurations>
+        <configuration key="dccatalog">turing</configuration>
+        <configuration key="dcterm">${head_index}</configuration>
+        <configuration key="default-value"><%= blank_symbol %></configuration>
+        <configuration key="match-value"><%= s %></configuration>
+        <configuration key="head_value"><%= s %></configuration>
+      </configurations>
+    </operation>
+  <% end %>
+  </operations>
+</definition>
+EOF
+
+# ----------------------------------------------------------------------------------------------------------------------
+
+TPL_WORKFLOW_HEAD_MOVE = ERB.new <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<definition xmlns="http://workflow.opencastproject.org">
+  <id><%= name %>-head-move</id>
+  <operations>
+
+    <operation
+      id="configure-by-dcterm"
+      if="${head_move} == 'RIGHT' OR ${head_move} == 'LEFT'"
+      description="└─ Move ${head_move}">
+      <configurations>
+        <configuration key="dccatalog">turing-constants</configuration>
+        <configuration key="dcterm"><%= symbols[0] %></configuration>
+        <configuration key="match-value"><%= symbols[0] %></configuration>
+        <configuration key="head_index">${DOLLAR}{${head_index}${head_move}}</configuration>
+      </configurations>
+    </operation>
+
+  </operations>
+</definition>
+EOF
+
+# ----------------------------------------------------------------------------------------------------------------------
+
+TPL_WORKFLOW_HALT = ERB.new <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<definition xmlns="http://workflow.opencastproject.org">
+  <id><%= name %>-halt</id>
+  <operations>
+
+    <operation id="tag" description="HALT: Archive result">
+      <configurations>
+        <configuration key="source-flavors">dublincore/*</configuration>
+        <configuration key="target-tags">+archive</configuration>
+      </configurations>
+    </operation>
+
+    <operation id="snapshot" description="SNAPSHOT">
+      <configurations>
+        <configuration key="source-tags">archive</configuration>
+      </configurations>
+    </operation>
+
+    <operation id="cleanup" description="CLEANUP">
+      <configurations>
+        <configuration key="delete-external">true</configuration>
+      </configurations>
+    </operation>
+
+  </operations>
+</definition>
+EOF
+
+# ----------------------------------------------------------------------------------------------------------------------
+
+TPL_WORKFLOW_STATE_MAIN = ERB.new <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<definition xmlns="http://workflow.opencastproject.org">
+  <id><%= name %>-<%= state_name %></id>
+  <operations>
+
+    <operation id="include" description="HEAD: LOAD">
+      <configurations>
+        <configuration key="workflow-id"><%= name %>-head-load</configuration>
+      </configurations>
+    </operation>
+
+    <operation id="include" description="HEAD: SET">
+      <configurations>
+        <configuration key="workflow-id"><%= name %>-<%= state_name %>-head-set</configuration>
+      </configurations>
+    </operation>
+
+    <operation id="include" description="STATE: SET">
+      <configurations>
+        <configuration key="workflow-id"><%= name %>-<%= state_name %>-state-set</configuration>
+      </configurations>
+    </operation>
+
+    <operation id="include" description="HEAD: MOVE">
+      <configurations>
+        <configuration key="workflow-id"><%= name %>-head-move</configuration>
+      </configurations>
+    </operation>
+
+    <operation id="include" description="STATE: SWITCH">
+      <configurations>
+        <configuration key="workflow-id"><%= name %>-state-switch</configuration>
+      </configurations>
+    </operation>
+
+  </operations>
+</definition>
+EOF
+
+# ----------------------------------------------------------------------------------------------------------------------
+
+TPL_WORKFLOW_STATE_HEAD_SET = ERB.new <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<definition xmlns="http://workflow.opencastproject.org">
+  <id><%= name %>-<%= state_name %>-head-set</id>
+  <operations>
+  <% state_rules.each do |from_symbol, rule| %>
+    <operation
+      id="transfer-metadata"
+      if="${head_value} == '<%= from_symbol %>'"
+      description="└─ <%= state_name %> : <%= from_symbol %> -> <%= rule[0] %>">
+      <configurations>
+        <configuration key="force">true</configuration>
+        <configuration key="target-flavor">dublincore/turing</configuration>
+        <configuration key="target-element">{http://purl.org/dc/terms/}${head_index}</configuration>
+        <configuration key="source-flavor">dublincore/turing-constants</configuration>
+        <configuration key="source-element">{http://purl.org/dc/terms/}<%= rule[0] %></configuration>
+      </configurations>
+    </operation>
+  <% end %>
+  </operations>
+</definition>
+EOF
+
+# ----------------------------------------------------------------------------------------------------------------------
+
+TPL_WORKFLOW_STATE_STATE_SET = ERB.new <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<definition xmlns="http://workflow.opencastproject.org">
+  <id><%= name %>-<%= state_name %>-state-set</id>
+  <operations>
+  <% state_rules.each do |from_symbol, rule| %>
+    <operation
+      id="configure-by-dcterm"
+      if="${head_value} == '<%= from_symbol %>'"
+      description="└─ <%= state_name %> : <%= from_symbol %> -> <%= rule[1] %> <%= rule[2] %>">
+      <configurations>
+        <configuration key="dccatalog">turing-constants</configuration>
+        <configuration key="dcterm"><%= symbols[0] %></configuration>
+        <configuration key="match-value"><%= symbols[0] %></configuration>
+        <configuration key="state"><%= rule[1] %></configuration>
+        <configuration key="head_move"><%= rule[2] %></configuration>
+      </configurations>
+    </operation>
+  <% end %>
+  </operations>
+</definition>
+EOF
+
+# ----------------------------------------------------------------------------------------------------------------------
+
+TPL_CATALOG_TURING_CONSTANTS = ERB.new <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<turing-constants xmlns="http://www.opencastproject.org/xsd/1.0/dublincore/" xmlns:dcterms="http://purl.org/dc/terms/">
+  <% symbols.each do |s| %>
+    <dcterms:<%= s %>><%= s %></dcterms:<%= s %>>
+  <% end %>
+</turing-constants>
+EOF
+
+# ----------------------------------------------------------------------------------------------------------------------
+
+TPL_CATALOG_EPISODE_INPUT = ERB.new <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<dublincore xmlns="http://www.opencastproject.org/xsd/1.0/dublincore/"
+  xmlns:dcterms="http://purl.org/dc/terms/"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dcterms:title><%= input_name %></dcterms:title>
+</dublincore>
+EOF
+
+# ----------------------------------------------------------------------------------------------------------------------
+
+TPL_CATALOG_TURING_INPUT = ERB.new <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<turing-constants xmlns="http://www.opencastproject.org/xsd/1.0/dublincore/" xmlns:dcterms="http://purl.org/dc/terms/">
+  <% input.each_with_index do |val, i| %>
+    <dcterms:<%= i %>><%= val %></dcterms:<%= i %>>
+  <% end %>
+</turing-constants>
+EOF
+
+# ----------------------------------------------------------------------------------------------------------------------
+
+TPL_SCRIPT_INGEST_INPUT = ERB.new <<EOF
+#!/usr/bin/env bash
+
+set -e
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+
+curl -sSL --digest -u opencast_system_account:CHANGE_ME -H "X-Requested-Auth: Digest" "http://localhost:8080/ingest/createMediaPackage" \\
+     -o "$DIR/mp.xml"
+
+curl -sSL --digest -u opencast_system_account:CHANGE_ME -H "X-Requested-Auth: Digest" "http://localhost:8080/ingest/addDCCatalog" \\
+     -F "flavor=dublincore/turing-constants" \\
+     -F "mediaPackage=<$DIR/mp.xml" \\
+     -F "dublinCore=<$DIR/dublincore-<%= name %>-turing-constants.xml" \\
+     -o $DIR/mp.xml
+
+curl -sSL --digest -u opencast_system_account:CHANGE_ME -H "X-Requested-Auth: Digest" "http://localhost:8080/ingest/addDCCatalog" \\
+     -F "flavor=dublincore/episode" \\
+     -F "mediaPackage=<$DIR/mp.xml" \\
+     -F "dublinCore=<$DIR/dublincore-<%= name %>-<%= input_name %>-episode.xml" \\
+     -o $DIR/mp.xml
+
+curl -sSL --digest -u opencast_system_account:CHANGE_ME -H "X-Requested-Auth: Digest" "http://localhost:8080/ingest/addDCCatalog" \\
+     -F "flavor=dublincore/turing" \\
+     -F "mediaPackage=<$DIR/mp.xml" \\
+     -F "dublinCore=<$DIR/dublincore-<%= name %>-<%= input_name %>-turing.xml" \\
+     -o $DIR/mp.xml
+
+curl -sSL --digest -u opencast_system_account:CHANGE_ME -H "X-Requested-Auth: Digest" "http://localhost:8080/ingest/ingest/<%= name %>" \\
+     -F "mediaPackage=<$DIR/mp.xml"
+
+rm "$DIR/mp.xml"
+EOF
+
+main
