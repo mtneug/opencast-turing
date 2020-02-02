@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 
 DESCRIPTIONS = [
+  # Increment binary number
   {
     name: 'increment',
     symbols: [ :BLANK, 0, 1 ],
