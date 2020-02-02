@@ -384,11 +384,11 @@ EOF
 
 TPL_CATALOG_TURING_INPUT = ERB.new <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<turing-constants xmlns="http://www.opencastproject.org/xsd/1.0/dublincore/" xmlns:dcterms="http://purl.org/dc/terms/">
+<turing xmlns="http://www.opencastproject.org/xsd/1.0/dublincore/" xmlns:dcterms="http://purl.org/dc/terms/">
   <% input.each_with_index do |val, i| %>
     <dcterms:<%= i %>><%= val %></dcterms:<%= i %>>
   <% end %>
-</turing-constants>
+</turing>
 EOF
 
 # ----------------------------------------------------------------------------------------------------------------------
