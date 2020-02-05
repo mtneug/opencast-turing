@@ -29,8 +29,8 @@ DESCRIPTIONS = [
     },
     inputs: {
       "increment-0":     [ 0 ],
-      "increment-1":     [ :BLANK, 1 ],
-      "increment-11":    [ :BLANK, 1, 1 ],
+      "increment-1":     [ 1 ],
+      "increment-11":    [ :BLANK, :BLANK, :BLANK, :BLANK, 1, 1 ],
       "increment-10011": [ 1, 0, 0, 1, 1 ],
     }
   },
